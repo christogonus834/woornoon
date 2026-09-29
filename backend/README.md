@@ -1,0 +1,88 @@
+# Workon API (Express + Supabase + Gemini)
+
+## 1. Create a Supabase project
+Go to supabase.com > New project. Once ready, open **Settings > API** and copy the **Project URL** and the **service_role** key (not anon).
+Open the **SQL Editor**, paste the contents of `schema.sql`, and run it — this also creates the `refund-evidence` storage bucket used for photo uploads.
+Go to **Authentication > Providers > Email** and turn off "Confirm email" so local sign-ups don't need a real inbox.
+
+> Already ran `schema.sql` before this update? Run `migration_002_images.sql`, `migration_003_realtime.sql`, `migration_004_settings_orders.sql` and `migration_005_final_sale.sql` once each instead of the whole schema again.
+
+## 2. Get AI provider keys
+- **Gemini (primary):** aistudio.google.com/apikey — create a key.
+- **Groq (backup, optional but recommended):** console.groq.com/keys — free key. Used only if every Gemini model fails.
+
+Both keys go in the backend only — never the frontend.
+
+## 3. Configure and run
+```
+cp .env.example .env
+```
+Fill in `.env`:
+- `SUPABASE_URL` — the Project URL from step 1
+- `SUPABASE_SERVICE_KEY` — the service_role key from step 1
+- `GEMINI_API_KEY` — from step 2
+- `GEMINI_MODEL` — optional; leave blank to let the app try its built-in list automatically
+- `GROQ_API_KEY` — optional backup provider from step 2
+- `GROQ_MODEL` — optional override; leave blank to use the built-in list
+- `CLIENT_ORIGIN` — leave as http://localhost:5173 for local dev
+
+```
+npm i
+npm run dev
+```
+You should see `Workon API ready` on port 4000.
+
+## 4. Seed ~15 demo customers (optional but recommended)
+```
+node seed.js
+```
+Creates 15 synthetic customer accounts with varied order histories — mixed ages (some inside/outside the refund window), mixed amounts (some above/below the auto-approval limit), a few marked final-sale, and one undelivered order — so every policy rule has a live example to demo without you creating test data by hand. Safe to re-run; it refreshes each seeded customer's orders rather than duplicating them.
+
+## 5. Create your own test accounts
+Once the frontend (see its own README) is running, sign up with any email/password (8+ chars) — this becomes a customer account with 3 demo orders auto-created. Sign up a second email for the admin account.
+Back in Supabase's SQL editor, run:
+```sql
+update profiles set role = 'admin' where email = 'your-second-email@example.com';
+```
+Sign in as that account to see the support dashboard.
+
+## Deploy on Render
+New Web Service > connect repo. Build: `npm install`. Start: `npm start`. Health check path: `/health`.
+Add the same env vars as above; set `CLIENT_ORIGIN` to your deployed Vercel URL (no trailing slash) once the frontend is live.
+
+## Flow and security
+Validate (zod) > ownership check > policy engine (`policy.js`) > AI triage (`ai.js`) > `decide()`.
+AI can only approve what policy already allows; injection flags, low confidence, or amounts over ₦50,000 go to human review.
+Also: JWT verification via Supabase, DB-backed roles (never trusted from the client), 404 on foreign IDs (IDOR prevention), idempotency keys, rate limits, helmet, append-only audit log.
+Never expose the service key or either AI key to the frontend.
+
+## AI provider fallback chain
+A single hardcoded model name is a single point of failure — providers rename or retire models over time. `ai.js` instead tries a list, in order, and only gives up if every option fails:
+1. Gemini models: `gemini-2.5-flash` → `gemini-2.5-flash-lite` → `gemini-2.0-flash` → `gemini-1.5-flash` → `gemini-1.5-flash-8b` (or `GEMINI_MODEL` first, if set).
+2. If every Gemini model fails: Groq models: `llama-3.3-70b-versatile` → `llama-3.1-8b-instant` → `gemma2-9b-it` (or `GROQ_MODEL` first, if set).
+3. If every model on both providers fails: a safe fallback response (`needs_review`, 0% confidence) — the refund is never lost, it just always lands in front of a human.
+
+Render logs show exactly which model/provider succeeded (`AI triage OK — Gemini/gemini-2.5-flash`) or why each one failed, so a bad key or dead model name is visible immediately instead of hiding behind a generic error.
+
+## Diagnosing a Gemini key that fails on every model
+If Test AI shows every Gemini model returning `404` (not just one), the key itself is the problem, not a model name — a wrong model name gives a different error. Verify directly:
+```
+https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_KEY
+```
+Paste that in a browser. If it doesn't return a JSON list of models, the fix is on Google's side, not this codebase:
+- Confirm the key was created at **aistudio.google.com/apikey** (not a Google Cloud/Vertex AI service-account key — different product, different key format).
+- In Google Cloud Console for that project, confirm the **Generative Language API** is enabled.
+- Try generating a brand new key from AI Studio and swapping it in — this alone fixes it most of the time.
+
+## Admin dashboard extras
+- **Live queue:** the admin dashboard subscribes to Postgres changes on `refund_requests` directly (Supabase Realtime), so a new or updated request appears without refreshing. Scoped to admins only via its own RLS policy (`migration_003_realtime.sql`) — customers cannot subscribe to other people's rows.
+- **CSV export:** the currently filtered tab (In review / Everything) exports to a `.csv` file client-side — no extra backend endpoint needed.
+- **Partial refunds:** admin can lower the approved amount before confirming (never raise it above what was requested).
+- **Photo evidence:** customers can attach a photo to a refund request, stored in the `refund-evidence` Supabase Storage bucket and shown to the admin during review.
+- **Orders CRUD:** full create/edit/delete for orders under the **Orders** tab — no more relying only on the 3 auto-generated demo orders. An order with refund requests against it can't be deleted (financial history stays intact), only edited.
+- **Editable policy + thresholds:** the **Settings** tab lets an admin rewrite the return policy text (fed directly into the AI's prompt on every request) and adjust the refund window, auto-approve limit, and minimum AI confidence — all without redeploying code. Falls back to sensible defaults if the settings row is ever missing.
+- **Test AI button:** shows which Gemini/Groq models your keys can actually use right now (discovered live from each provider, never hardcoded — a renamed or retired model name can't silently break this), pings each, and reports the real error for each. Use this first whenever the AI seems to be failing.
+- **Reason categories:** the refund form asks the customer to pick a reason type up front (Defective, Not as described, etc.) in addition to free text — that category is folded into what the AI reads, giving it a stronger signal than prose alone.
+- **Policy-violation replies are never AI-authored:** a request rejected by a hard rule (window, balance, delivery) gets a reply generated by code stating the real reason — this is what stops a rejected request from ever showing "under review" to the customer.
+- **Unit tests:** `npm test` runs the policy engine's test suite (14 cases) covering final sale items, the refund window, remaining-balance math, AI-override limits, and injection handling — run this after any change to `policy.js`.
+- **Final sale items:** an order can be marked final-sale in the Orders tab; the policy engine rejects any refund request against it outright, regardless of what the AI thinks.
