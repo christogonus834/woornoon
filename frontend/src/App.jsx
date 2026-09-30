@@ -156,6 +156,7 @@ function Customer({ view }) {
         <span>{money(f.amount)}</span>
         {f.image_url && <img className="evidence-thumb" src={f.image_url} alt="Uploaded evidence" />}
         {f.draft_reply && <p className="reply">{f.draft_reply}</p>}
+        {f.admin_note && <p className="reply">Note from our team: {f.admin_note}</p>}
         {f.status === 'needs_review' && <p className="reply">Our AI reviewed this and flagged it for a support agent to make the final call. You'll see the outcome here.</p>}
         {['pending', 'needs_review'].includes(f.status) && <button className="link" onClick={() => cancel(f.id)}>Cancel request</button>}
       </article>))}</div>
@@ -306,7 +307,10 @@ function Admin({ view }) {
         <label>Note to record<input value={note} maxLength={500} onChange={(e) => setNote(e.target.value)} /></label>
         {err && <p className="err" role="alert">{err}</p>}
         <div className="actions"><button className="btn" onClick={() => decide('rejected')}>Reject</button><button className="btn primary" onClick={() => decide('approved')}>Approve refund</button></div>
-      </>) : <Pill s={sel.status} />}
+      </>) : (<div className="outcome">
+        <Pill s={sel.status} />
+        {sel.admin_note ? <p className="muted" style={{ marginTop: '.5rem' }}>Note left by the reviewing admin: {sel.admin_note}</p> : <p className="muted" style={{ marginTop: '.5rem' }}>No note was left for this decision.</p>}
+      </div>)}
     </div>)}</Drawer>
   </div>);
 }
